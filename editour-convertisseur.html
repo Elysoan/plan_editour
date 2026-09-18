@@ -206,7 +206,28 @@ function ll(p) { return [parseFloat(p.la), parseFloat(p.lo)]; }
 // ════════════════════════════════════════════════════════════════
 //  CONSTANTES
 // ════════════════════════════════════════════════════════════════
-const CAPTEURS = ['Bac Gauche','Bac Droit','Grand Bac','Ripeur Gauche','Ripeur Droit'];
+// Chaque sous-liste = variantes (normalisées) acceptées pour un même capteur.
+// Les exports véhicule varient : "Bac Gauche (OM)", "Bac Droit (Bio)", faute
+// "Ripper" au lieu de "Ripeur", etc. — on matche par racine, pas par nom exact.
+const CAPTEURS_PATTERNS = [
+  ['bacgauche'], ['bacdroit'], ['baccentral'], ['grandbac'],
+  ['ripeurgauche','rippergauche'], ['ripeurdroit','ripperdroit'],
+];
+function normCol(s) {
+  return s.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/\([^)]*\)/g,'')
+    .replace(/[^a-z]/g,'');
+}
+function detecterColonnesCapteurs(idx) {
+  const keys = Object.keys(idx);
+  const resolved = [];
+  for (const variants of CAPTEURS_PATTERNS) {
+    const k = keys.find(k => variants.includes(normCol(k)));
+    if (k) resolved.push(k);
+  }
+  return resolved;
+}
 const COUVERTURE_M=40, LONGUEUR_MIN_M=50, COMBLE_TROU=5, RDP_EPS_M=15;
 const MIN_SEG_M=30, MAX_AJOUT=25, CAP_RAYON_M=10, CAP_MINI=6;
 const SEG_DIST_M=35, HLP_DT_METRES=450;
@@ -226,6 +247,7 @@ function detecterColonneTemps(idx) {
   const dk = keys.find(k => norm(k)==='date');
   const hk = keys.find(k => ['heure','heures','time'].includes(norm(k)));
   if (dk && hk) return {mode:'pair', dateCol:dk, heureCol:hk};
+  if (hk) return {mode:'heureOnly', col:hk};  // ex: colonne "Heure" seule, sans "Date"
   k = keys.find(k => { const n=norm(k); return n.includes('date')||n.includes('heure')||n.includes('time'); });
   if (k) return {mode:'single', col:k};
   return null;
@@ -242,6 +264,15 @@ function parseDateHeure(s) {
   return isNaN(t) ? null : t;
 }
 
+// Heure seule (pas de date associée) — on ancre sur une date arbitraire fixe,
+// seul l'écart entre points importe pour la détection de coupures.
+function parseHeure(s) {
+  if (!s) return null;
+  const m = s.trim().match(/^(\d{1,2}):(\d{2})(:(\d{2}))?$/);
+  if (!m) return null;
+  return new Date(2000,0,1,+m[1],+m[2],+(m[4]||0)).getTime();
+}
+
 function lireCSV(text) {
   // Enlever BOM utf-8-sig
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -253,6 +284,7 @@ function lireCSV(text) {
   const idx = {};
   cols.forEach((c,i) => idx[c]=i);
   const tcol = detecterColonneTemps(idx);
+  const capCols = detecterColonnesCapteurs(idx);
   const NUM = /^\d+\s*[A-Za-z]?\s+/;
   const pts = [];
   for (let i=1;i<lines.length;i++) {
@@ -263,15 +295,15 @@ function lireCSV(text) {
     if (isNaN(la)||isNaN(lo)) continue;
     const adr = (row[idx['Adresse']]||'').trim().replace(NUM,'').trim();
     const ce  = (row[idx['Commune']]||'').trim();
-    const cap = CAPTEURS.some(c => {
+    const cap = capCols.some(c => {
       const v = (row[idx[c]]||'').trim();
       return v && v !== '0' && v.toLowerCase() !== 'false';
     });
     let ts = null;
     if (tcol) {
-      ts = tcol.mode==='single'
-        ? parseDateHeure(row[idx[tcol.col]])
-        : parseDateHeure(row[idx[tcol.dateCol]]+' '+row[idx[tcol.heureCol]]);
+      if (tcol.mode==='single') ts = parseDateHeure(row[idx[tcol.col]]);
+      else if (tcol.mode==='pair') ts = parseDateHeure(row[idx[tcol.dateCol]]+' '+row[idx[tcol.heureCol]]);
+      else if (tcol.mode==='heureOnly') ts = parseHeure(row[idx[tcol.col]]);
     }
     pts.push({la, lo, rue: adr, ce, cap, ts});
   }
@@ -719,6 +751,10 @@ function pipeline(xmlText, csvText, timeFilter) {
 
   log(`  XML brut : ${xmlPtsRaw.length} points`);
   log(`  CSV télémétrie : ${csvPts.length} points`);
+  const nCapDetect = csvPts.filter(p=>p.cap).length;
+  const nTsDetect = csvPts.filter(p=>p.ts!=null).length;
+  log(`  Capteurs actifs détectés : ${nCapDetect}/${csvPts.length} points${nCapDetect===0?'  ⚠ aucun — vérifier les noms de colonnes du CSV':''}`);
+  log(`  Horodatage détecté : ${nTsDetect}/${csvPts.length} points${nTsDetect===0?' (aucune colonne date/heure reconnue)':''}`);
 
   if (timeFilter) {
     const avant = csvPts.length;
