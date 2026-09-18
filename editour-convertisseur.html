@@ -101,6 +101,20 @@ html,body{min-height:100%;font-family:'Inter',system-ui,sans-serif;background:va
 /* note OSM */
 .osm-note{margin-top:20px;font-size:12px;color:var(--muted);line-height:1.5;padding:10px 14px;background:var(--panel);border-radius:6px;border:1px solid var(--border)}
 .osm-note strong{color:var(--text);font-weight:500}
+
+/* tranche horaire */
+.timerange{margin-top:20px;display:none;background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.th-label{font-size:13px;font-weight:600;margin-bottom:4px}
+.th-optional{font-size:11px;font-weight:400;color:var(--muted)}
+.th-hint{font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5}
+.th-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.chip{font-family:'JetBrains Mono',monospace;font-size:11.5px;padding:6px 12px;border-radius:20px;border:1px solid var(--border-hi);background:var(--well);color:var(--text);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.chip:hover{border-color:var(--teal)}
+.chip.active{background:var(--teal-dim);border-color:var(--teal);color:var(--teal)}
+.th-custom{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding-top:10px;border-top:1px solid var(--border);flex-wrap:wrap}
+.th-custom input[type=time]{background:var(--well);border:1px solid var(--border-hi);color:var(--text);border-radius:6px;padding:5px 8px;font-family:'JetBrains Mono',monospace;font-size:12px}
+.th-apply{background:var(--dim);color:var(--text);border:1px solid var(--border-hi);border-radius:6px;padding:5px 12px;font-size:11.5px;cursor:pointer}
+.th-apply:hover{border-color:var(--teal);color:var(--teal)}
 </style>
 </head>
 <body>
@@ -121,6 +135,17 @@ html,body{min-height:100%;font-family:'Inter',system-ui,sans-serif;background:va
   </div>
 
   <div class="files" id="files"></div>
+
+  <div class="timerange" id="timerange">
+    <div class="th-label">Tranche horaire du circuit <span class="th-optional">(optionnel)</span></div>
+    <div class="th-hint" id="th-hint"></div>
+    <div class="th-chips" id="th-chips"></div>
+    <div class="th-custom">
+      <span>Personnalisé :</span>
+      <input type="time" id="th-from"> <span>→</span> <input type="time" id="th-to">
+      <button type="button" class="th-apply" onclick="appliquerPlagePerso()">Appliquer</button>
+    </div>
+  </div>
 
   <button class="btn-run" id="btn-run" disabled onclick="convert()">Convertir</button>
 
@@ -192,6 +217,31 @@ const A_DROITE='Collecte \u00e0 droite', BILATERALE='Collecte bilat\u00e9rale', 
 // ════════════════════════════════════════════════════════════════
 //  LECTURE CSV
 // ════════════════════════════════════════════════════════════════
+function detecterColonneTemps(idx) {
+  const keys = Object.keys(idx);
+  const norm = s => s.toLowerCase().replace(/[^a-z]/g,'');
+  const singleCands = ['dateheure','datetime','horodatage','timestamp','datemesure','dateevenement','dateevt','datepointage'];
+  let k = keys.find(k => singleCands.includes(norm(k)));
+  if (k) return {mode:'single', col:k};
+  const dk = keys.find(k => norm(k)==='date');
+  const hk = keys.find(k => ['heure','heures','time'].includes(norm(k)));
+  if (dk && hk) return {mode:'pair', dateCol:dk, heureCol:hk};
+  k = keys.find(k => { const n=norm(k); return n.includes('date')||n.includes('heure')||n.includes('time'); });
+  if (k) return {mode:'single', col:k};
+  return null;
+}
+
+function parseDateHeure(s) {
+  if (!s) return null;
+  s = s.trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(:(\d{2}))?/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +(m[7]||0)).getTime();
+  m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})[ T]?(\d{2}):(\d{2})(:(\d{2}))?/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1], +m[4], +m[5], +(m[7]||0)).getTime();
+  const t = Date.parse(s.replace(' ','T'));
+  return isNaN(t) ? null : t;
+}
+
 function lireCSV(text) {
   // Enlever BOM utf-8-sig
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -202,6 +252,7 @@ function lireCSV(text) {
   const cols = lines[0].split(sep).map(c => c.trim().replace(/^"|"$/g,''));
   const idx = {};
   cols.forEach((c,i) => idx[c]=i);
+  const tcol = detecterColonneTemps(idx);
   const NUM = /^\d+\s*[A-Za-z]?\s+/;
   const pts = [];
   for (let i=1;i<lines.length;i++) {
@@ -216,9 +267,49 @@ function lireCSV(text) {
       const v = (row[idx[c]]||'').trim();
       return v && v !== '0' && v.toLowerCase() !== 'false';
     });
-    pts.push({la, lo, rue: adr, ce, cap});
+    let ts = null;
+    if (tcol) {
+      ts = tcol.mode==='single'
+        ? parseDateHeure(row[idx[tcol.col]])
+        : parseDateHeure(row[idx[tcol.dateCol]]+' '+row[idx[tcol.heureCol]]);
+    }
+    pts.push({la, lo, rue: adr, ce, cap, ts});
   }
   return pts;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  DÉTECTION DES COUPURES TEMPORELLES (tranches horaires / circuits)
+// ════════════════════════════════════════════════════════════════
+const GAP_MIN = 20; // minutes — au-delà, on considère un nouveau circuit
+
+function detecterSegments(pts, gapMin=GAP_MIN) {
+  const withTs = pts.filter(p=>p.ts!=null);
+  if (withTs.length < 2) return null;
+  const segs = [];
+  let s = 0;
+  for (let i=1;i<pts.length;i++) {
+    const a=pts[i-1].ts, b=pts[i].ts;
+    if (a!=null && b!=null && b-a > gapMin*60000) {
+      segs.push([s,i-1]);
+      s = i;
+    }
+  }
+  segs.push([s, pts.length-1]);
+  return segs.map(([s,e])=>{
+    const sub = pts.slice(s,e+1).filter(p=>p.ts!=null);
+    return {
+      startIdx:s, endIdx:e,
+      start: sub.length ? sub[0].ts : null,
+      end: sub.length ? sub[sub.length-1].ts : null,
+      n: e-s+1
+    };
+  });
+}
+
+function fmtHeure(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -615,7 +706,7 @@ function recalcDt(pts) {
 // ════════════════════════════════════════════════════════════════
 //  PIPELINE COMPLET
 // ════════════════════════════════════════════════════════════════
-function pipeline(xmlText, csvText) {
+function pipeline(xmlText, csvText, timeFilter) {
   const logs=[];
   const log=s=>{logs.push(s);};
 
@@ -623,11 +714,17 @@ function pipeline(xmlText, csvText) {
   log('LECTURE DES FICHIERS');
 
   const {attrs: rootAttrs, pts: xmlPtsRaw} = lireXML(xmlText);
-  const csvPts = lireCSV(csvText);
+  let csvPts = lireCSV(csvText);
   const nc = rootAttrs.nc||'parcours';
 
   log(`  XML brut : ${xmlPtsRaw.length} points`);
   log(`  CSV télémétrie : ${csvPts.length} points`);
+
+  if (timeFilter) {
+    const avant = csvPts.length;
+    csvPts = csvPts.filter(p => p.ts==null || (p.ts>=timeFilter.start && p.ts<=timeFilter.end));
+    log(`  Tranche horaire appliquée : ${fmtHeure(timeFilter.start)}–${fmtHeure(timeFilter.end)} → ${avant} → ${csvPts.length} points CSV conservés`);
+  }
 
   // Zone communes
   const zone = zoneCommunes(xmlPtsRaw);
@@ -719,6 +816,8 @@ function pipeline(xmlText, csvText) {
 //  UI
 // ════════════════════════════════════════════════════════════════
 let xmlFile=null, csvFile=null;
+let timeFilter=null;   // {start,end} epoch ms, ou null = pas de filtre
+let csvTsBase=null;    // date de référence pour combiner les champs "heure" manuels
 
 const dz=document.getElementById('dz');
 const fi=document.getElementById('fi');
@@ -734,8 +833,86 @@ function onFiles(files) {
     else if(ext==='csv') csvFile=f;
   }
   render();
+  analyserPlageHoraire();
 }
-function removeFile(t) { if(t==='xml') xmlFile=null; else csvFile=null; render(); }
+function removeFile(t) { if(t==='xml') xmlFile=null; else csvFile=null; render(); analyserPlageHoraire(); }
+
+// ════════════════════════════════════════════════════════════════
+//  UI — TRANCHE HORAIRE
+// ════════════════════════════════════════════════════════════════
+function resetTimeRange() {
+  document.getElementById('timerange').style.display='none';
+  document.getElementById('th-chips').innerHTML='';
+  timeFilter=null; csvTsBase=null;
+}
+
+async function analyserPlageHoraire() {
+  if (!csvFile) { resetTimeRange(); return; }
+  try {
+    const text = await readFile(csvFile);
+    const pts = lireCSV(text);
+    const segs = detecterSegments(pts);
+    renderTimeRange(segs);
+  } catch(e) {
+    resetTimeRange();
+  }
+}
+
+function renderTimeRange(segs) {
+  const box=document.getElementById('timerange');
+  const chips=document.getElementById('th-chips');
+  const hint=document.getElementById('th-hint');
+  chips.innerHTML='';
+  if (!segs) { box.style.display='none'; timeFilter=null; csvTsBase=null; return; }
+  box.style.display='block';
+  const base = segs.find(s=>s.start!=null);
+  csvTsBase = base ? base.start : null;
+
+  const mkChip=(label,val,active)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='chip'+(active?' active':'');
+    b.textContent=label;
+    b.onclick=()=>{
+      timeFilter=val;
+      [...chips.children].forEach(c=>c.classList.remove('active'));
+      b.classList.add('active');
+    };
+    return b;
+  };
+
+  if (segs.length<=1) {
+    hint.textContent="Aucune coupure détectée dans l'historique — le CSV semble correspondre à un seul circuit.";
+    chips.appendChild(mkChip('Tout le fichier', null, true));
+    timeFilter=null;
+  } else {
+    hint.textContent=`${segs.length} tranches détectées (coupure > ${GAP_MIN} min). La plus fournie est sélectionnée par défaut — changez-la si besoin.`;
+    let iMax=0;
+    segs.forEach((s,i)=>{ if(s.n>segs[iMax].n) iMax=i; });
+    segs.forEach((s,i)=>{
+      const label = s.start!=null ? `${fmtHeure(s.start)}–${fmtHeure(s.end)} (${s.n} pts)` : `Tranche ${i+1} (${s.n} pts)`;
+      const val = s.start!=null ? {start:s.start-60000, end:s.end+60000} : null;
+      chips.appendChild(mkChip(label, val, i===iMax));
+    });
+    chips.appendChild(mkChip('Tout (fusionner)', null, false));
+    const first=segs[iMax];
+    timeFilter = first.start!=null ? {start:first.start-60000, end:first.end+60000} : null;
+  }
+}
+
+function combineDateTime(baseTs, hhmm) {
+  const d=new Date(baseTs);
+  const [h,m]=hhmm.split(':').map(Number);
+  d.setHours(h,m,0,0);
+  return d.getTime();
+}
+
+function appliquerPlagePerso() {
+  const from=document.getElementById('th-from').value;
+  const to=document.getElementById('th-to').value;
+  if (!from || !to || csvTsBase==null) return;
+  timeFilter = { start: combineDateTime(csvTsBase, from), end: combineDateTime(csvTsBase, to) };
+  [...document.getElementById('th-chips').children].forEach(c=>c.classList.remove('active'));
+}
 
 function fmt(b) { return b>1048576?(b/1048576).toFixed(1)+' Mo':Math.round(b/1024)+' Ko'; }
 
@@ -783,7 +960,7 @@ async function convert() {
     const xmlText=await readFile(xmlFile);
     const csvText=await readFile(csvFile);
     await new Promise(r=>setTimeout(r,10)); // laisser le DOM se mettre à jour
-    const {xml, logs, nc} = pipeline(xmlText, csvText);
+    const {xml, logs, nc} = pipeline(xmlText, csvText, timeFilter);
     document.getElementById('log-body').textContent=logs.join('\n');
     document.getElementById('dot').className='dot ok';
     document.getElementById('log-label').textContent='Terminé';
