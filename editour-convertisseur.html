@@ -101,6 +101,20 @@ html,body{min-height:100%;font-family:'Inter',system-ui,sans-serif;background:va
 /* note OSM */
 .osm-note{margin-top:20px;font-size:12px;color:var(--muted);line-height:1.5;padding:10px 14px;background:var(--panel);border-radius:6px;border:1px solid var(--border)}
 .osm-note strong{color:var(--text);font-weight:500}
+
+/* tranche horaire */
+.timerange{margin-top:20px;display:none;background:var(--panel);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px}
+.th-label{font-size:13px;font-weight:600;margin-bottom:4px}
+.th-optional{font-size:11px;font-weight:400;color:var(--muted)}
+.th-hint{font-size:12px;color:var(--muted);margin-bottom:10px;line-height:1.5}
+.th-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+.chip{font-family:'JetBrains Mono',monospace;font-size:11.5px;padding:6px 12px;border-radius:20px;border:1px solid var(--border-hi);background:var(--well);color:var(--text);cursor:pointer;transition:border-color .15s,color .15s,background .15s}
+.chip:hover{border-color:var(--teal)}
+.chip.active{background:var(--teal-dim);border-color:var(--teal);color:var(--teal)}
+.th-custom{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);padding-top:10px;border-top:1px solid var(--border);flex-wrap:wrap}
+.th-custom input[type=time]{background:var(--well);border:1px solid var(--border-hi);color:var(--text);border-radius:6px;padding:5px 8px;font-family:'JetBrains Mono',monospace;font-size:12px}
+.th-apply{background:var(--dim);color:var(--text);border:1px solid var(--border-hi);border-radius:6px;padding:5px 12px;font-size:11.5px;cursor:pointer}
+.th-apply:hover{border-color:var(--teal);color:var(--teal)}
 </style>
 </head>
 <body>
@@ -121,6 +135,17 @@ html,body{min-height:100%;font-family:'Inter',system-ui,sans-serif;background:va
   </div>
 
   <div class="files" id="files"></div>
+
+  <div class="timerange" id="timerange">
+    <div class="th-label">Tranche horaire du circuit <span class="th-optional">(optionnel)</span></div>
+    <div class="th-hint" id="th-hint"></div>
+    <div class="th-chips" id="th-chips"></div>
+    <div class="th-custom">
+      <span>Personnalisé :</span>
+      <input type="time" id="th-from"> <span>→</span> <input type="time" id="th-to">
+      <button type="button" class="th-apply" onclick="appliquerPlagePerso()">Appliquer</button>
+    </div>
+  </div>
 
   <button class="btn-run" id="btn-run" disabled onclick="convert()">Convertir</button>
 
@@ -181,7 +206,28 @@ function ll(p) { return [parseFloat(p.la), parseFloat(p.lo)]; }
 // ════════════════════════════════════════════════════════════════
 //  CONSTANTES
 // ════════════════════════════════════════════════════════════════
-const CAPTEURS = ['Bac Gauche','Bac Droit','Grand Bac','Ripeur Gauche','Ripeur Droit'];
+// Chaque sous-liste = variantes (normalisées) acceptées pour un même capteur.
+// Les exports véhicule varient : "Bac Gauche (OM)", "Bac Droit (Bio)", faute
+// "Ripper" au lieu de "Ripeur", etc. — on matche par racine, pas par nom exact.
+const CAPTEURS_PATTERNS = [
+  ['bacgauche'], ['bacdroit'], ['baccentral'], ['grandbac'],
+  ['ripeurgauche','rippergauche'], ['ripeurdroit','ripperdroit'],
+];
+function normCol(s) {
+  return s.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g,'')
+    .replace(/\([^)]*\)/g,'')
+    .replace(/[^a-z]/g,'');
+}
+function detecterColonnesCapteurs(idx) {
+  const keys = Object.keys(idx);
+  const resolved = [];
+  for (const variants of CAPTEURS_PATTERNS) {
+    const k = keys.find(k => variants.includes(normCol(k)));
+    if (k) resolved.push(k);
+  }
+  return resolved;
+}
 const COUVERTURE_M=40, LONGUEUR_MIN_M=50, COMBLE_TROU=5, RDP_EPS_M=15;
 const MIN_SEG_M=30, MAX_AJOUT=25, CAP_RAYON_M=10, CAP_MINI=6;
 const SEG_DIST_M=35, HLP_DT_METRES=450;
@@ -192,6 +238,41 @@ const A_DROITE='Collecte \u00e0 droite', BILATERALE='Collecte bilat\u00e9rale', 
 // ════════════════════════════════════════════════════════════════
 //  LECTURE CSV
 // ════════════════════════════════════════════════════════════════
+function detecterColonneTemps(idx) {
+  const keys = Object.keys(idx);
+  const norm = s => s.toLowerCase().replace(/[^a-z]/g,'');
+  const singleCands = ['dateheure','datetime','horodatage','timestamp','datemesure','dateevenement','dateevt','datepointage'];
+  let k = keys.find(k => singleCands.includes(norm(k)));
+  if (k) return {mode:'single', col:k};
+  const dk = keys.find(k => norm(k)==='date');
+  const hk = keys.find(k => ['heure','heures','time'].includes(norm(k)));
+  if (dk && hk) return {mode:'pair', dateCol:dk, heureCol:hk};
+  if (hk) return {mode:'heureOnly', col:hk};  // ex: colonne "Heure" seule, sans "Date"
+  k = keys.find(k => { const n=norm(k); return n.includes('date')||n.includes('heure')||n.includes('time'); });
+  if (k) return {mode:'single', col:k};
+  return null;
+}
+
+function parseDateHeure(s) {
+  if (!s) return null;
+  s = s.trim();
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(:(\d{2}))?/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +(m[7]||0)).getTime();
+  m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})[ T]?(\d{2}):(\d{2})(:(\d{2}))?/);
+  if (m) return new Date(+m[3], +m[2]-1, +m[1], +m[4], +m[5], +(m[7]||0)).getTime();
+  const t = Date.parse(s.replace(' ','T'));
+  return isNaN(t) ? null : t;
+}
+
+// Heure seule (pas de date associée) — on ancre sur une date arbitraire fixe,
+// seul l'écart entre points importe pour la détection de coupures.
+function parseHeure(s) {
+  if (!s) return null;
+  const m = s.trim().match(/^(\d{1,2}):(\d{2})(:(\d{2}))?$/);
+  if (!m) return null;
+  return new Date(2000,0,1,+m[1],+m[2],+(m[4]||0)).getTime();
+}
+
 function lireCSV(text) {
   // Enlever BOM utf-8-sig
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
@@ -202,6 +283,10 @@ function lireCSV(text) {
   const cols = lines[0].split(sep).map(c => c.trim().replace(/^"|"$/g,''));
   const idx = {};
   cols.forEach((c,i) => idx[c]=i);
+  const tcol = detecterColonneTemps(idx);
+  const capCols = detecterColonnesCapteurs(idx);
+  const vCol = Object.keys(idx).find(k => ['vitesse','vitessekmh','speed'].includes(normCol(k))) || null;
+  const maCol = Object.keys(idx).find(k => ['marchearriere','marchearr','reverse'].includes(normCol(k))) || null;
   const NUM = /^\d+\s*[A-Za-z]?\s+/;
   const pts = [];
   for (let i=1;i<lines.length;i++) {
@@ -212,13 +297,57 @@ function lireCSV(text) {
     if (isNaN(la)||isNaN(lo)) continue;
     const adr = (row[idx['Adresse']]||'').trim().replace(NUM,'').trim();
     const ce  = (row[idx['Commune']]||'').trim();
-    const cap = CAPTEURS.some(c => {
+    const cap = capCols.some(c => {
       const v = (row[idx[c]]||'').trim();
       return v && v !== '0' && v.toLowerCase() !== 'false';
     });
-    pts.push({la, lo, rue: adr, ce, cap});
+    let ts = null;
+    if (tcol) {
+      if (tcol.mode==='single') ts = parseDateHeure(row[idx[tcol.col]]);
+      else if (tcol.mode==='pair') ts = parseDateHeure(row[idx[tcol.dateCol]]+' '+row[idx[tcol.heureCol]]);
+      else if (tcol.mode==='heureOnly') ts = parseHeure(row[idx[tcol.col]]);
+    }
+    let v = null;
+    if (vCol) { const n = parseFloat((row[idx[vCol]]||'').replace(',','.')); v = isNaN(n) ? null : n; }
+    let ma = false;
+    if (maCol) { const mv=(row[idx[maCol]]||'').trim(); ma = !!mv && mv!=='0' && mv.toLowerCase()!=='false'; }
+    pts.push({la, lo, rue: adr, ce, cap, ts, v, ma});
   }
   return pts;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  DÉTECTION DES COUPURES TEMPORELLES (tranches horaires / circuits)
+// ════════════════════════════════════════════════════════════════
+const GAP_MIN = 20; // minutes — au-delà, on considère un nouveau circuit
+
+function detecterSegments(pts, gapMin=GAP_MIN) {
+  const withTs = pts.filter(p=>p.ts!=null);
+  if (withTs.length < 2) return null;
+  const segs = [];
+  let s = 0;
+  for (let i=1;i<pts.length;i++) {
+    const a=pts[i-1].ts, b=pts[i].ts;
+    if (a!=null && b!=null && b-a > gapMin*60000) {
+      segs.push([s,i-1]);
+      s = i;
+    }
+  }
+  segs.push([s, pts.length-1]);
+  return segs.map(([s,e])=>{
+    const sub = pts.slice(s,e+1).filter(p=>p.ts!=null);
+    return {
+      startIdx:s, endIdx:e,
+      start: sub.length ? sub[0].ts : null,
+      end: sub.length ? sub[sub.length-1].ts : null,
+      n: e-s+1
+    };
+  });
+}
+
+function fmtHeure(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -302,6 +431,83 @@ function portionsManquantes(csvPts, dist, zone) {
     if (L>=LONGUEUR_MIN_M) portions.push([s,e,L]);
   }
   return portions;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  FUSION DES PAIRES ALLER-RETOUR (culs-de-sac / manœuvres)
+// ════════════════════════════════════════════════════════════════
+// Deux "portions manquantes" dont les extrémités se recoupent peuvent être
+// le même aller-retour vu deux fois (ex: cul-de-sac) plutôt que deux rues
+// distinctes. On ne fusionne que si un vrai demi-tour est détecté entre les
+// deux (marche arrière si dispo, sinon vitesse quasi nulle soutenue, sinon
+// en dernier recours un renversement d'angle marqué) — pas sur la seule
+// proximité géographique des extrémités, qui pourrait aussi être une
+// simple boucle de rues distinctes.
+const DEMI_TOUR_RAYON_M = 60;
+const DEMI_TOUR_VITESSE_MAX = 6;
+const DEMI_TOUR_DELAI_MAX_MS = 5*60000;   // durée plausible d'une manœuvre, pas d'un repassage plus tard
+const DEMI_TOUR_DELAI_MAX_PTS = 40;       // repli si le CSV n'a pas d'horodatage exploitable
+
+// i0..i1 doit être la fenêtre EXACTE entre les deux portions, pas leur étendue
+// totale — sinon on capte n'importe quel arrêt/manœuvre du reste du trajet.
+function detecterDemiTour(csvPts, i0, i1) {
+  for (let k=i0;k<=i1;k++) if (csvPts[k].ma) return true;
+  let lentConsec=0;
+  for (let k=i0;k<=i1;k++) {
+    const v = csvPts[k].v;
+    if (v!=null && v<=DEMI_TOUR_VITESSE_MAX) { lentConsec++; if(lentConsec>=2) return true; }
+    else lentConsec=0;
+  }
+  for (let k=Math.max(i0,1);k<i1;k++) {
+    const a=[csvPts[k-1].la,csvPts[k-1].lo], b=[csvPts[k].la,csvPts[k].lo], c=[csvPts[k+1].la,csvPts[k+1].lo];
+    if (havll(a,b)<3 || havll(b,c)<3) continue;
+    if (angdiff(bearing(a,b), bearing(b,c))>150) return true;
+  }
+  return false;
+}
+
+function fusionnerAllersRetours(portions, csvPts) {
+  const used = new Set();
+  const fusion = [];
+  let nFusions = 0;
+  for (let i=0;i<portions.length;i++) {
+    if (used.has(i)) continue;
+    const [si,ei] = portions[i];
+    let partenaire = -1;
+    for (let j=i+1;j<portions.length;j++) {
+      if (used.has(j)) continue;
+      const [sj,ej] = portions[j];
+      // la fenêtre entre les deux portions : seule zone scannée pour le demi-tour
+      let gLo, gHi;
+      if (ei < sj) { gLo = ei; gHi = sj; }
+      else if (ej < si) { gLo = ej; gHi = si; }
+      else continue; // portions imbriquées : pas un aller-retour propre
+      const delaiOk = (csvPts[gLo].ts!=null && csvPts[gHi].ts!=null)
+        ? Math.abs(csvPts[gHi].ts-csvPts[gLo].ts) <= DEMI_TOUR_DELAI_MAX_MS
+        : (gHi-gLo) <= DEMI_TOUR_DELAI_MAX_PTS;
+      if (!delaiOk) continue;
+      const aDebut=[csvPts[si].la,csvPts[si].lo], aFin=[csvPts[ei].la,csvPts[ei].lo];
+      const bDebut=[csvPts[sj].la,csvPts[sj].lo], bFin=[csvPts[ej].la,csvPts[ej].lo];
+      const rondTrip = havll(aFin,bDebut)<DEMI_TOUR_RAYON_M && havll(bFin,aDebut)<DEMI_TOUR_RAYON_M;
+      if (!rondTrip) continue;
+      if (!detecterDemiTour(csvPts, gLo, gHi)) continue;
+      partenaire = j;
+      break;
+    }
+    if (partenaire>=0) {
+      const [sj,ej] = portions[partenaire];
+      const s=Math.min(si,sj), e=Math.max(ei,ej);
+      let L=0;
+      for (let k=s+1;k<=e;k++) L += havll([csvPts[k-1].la,csvPts[k-1].lo],[csvPts[k].la,csvPts[k].lo]);
+      fusion.push([s,e,L]);
+      used.add(i); used.add(partenaire);
+      nFusions++;
+    } else {
+      fusion.push(portions[i]);
+      used.add(i);
+    }
+  }
+  return {portions: fusion, nFusions};
 }
 
 // Douglas-Peucker itératif
@@ -615,7 +821,7 @@ function recalcDt(pts) {
 // ════════════════════════════════════════════════════════════════
 //  PIPELINE COMPLET
 // ════════════════════════════════════════════════════════════════
-function pipeline(xmlText, csvText) {
+function pipeline(xmlText, csvText, timeFilter) {
   const logs=[];
   const log=s=>{logs.push(s);};
 
@@ -623,11 +829,21 @@ function pipeline(xmlText, csvText) {
   log('LECTURE DES FICHIERS');
 
   const {attrs: rootAttrs, pts: xmlPtsRaw} = lireXML(xmlText);
-  const csvPts = lireCSV(csvText);
+  let csvPts = lireCSV(csvText);
   const nc = rootAttrs.nc||'parcours';
 
   log(`  XML brut : ${xmlPtsRaw.length} points`);
   log(`  CSV télémétrie : ${csvPts.length} points`);
+  const nCapDetect = csvPts.filter(p=>p.cap).length;
+  const nTsDetect = csvPts.filter(p=>p.ts!=null).length;
+  log(`  Capteurs actifs détectés : ${nCapDetect}/${csvPts.length} points${nCapDetect===0?'  ⚠ aucun — vérifier les noms de colonnes du CSV':''}`);
+  log(`  Horodatage détecté : ${nTsDetect}/${csvPts.length} points${nTsDetect===0?' (aucune colonne date/heure reconnue)':''}`);
+
+  if (timeFilter) {
+    const avant = csvPts.length;
+    csvPts = csvPts.filter(p => p.ts==null || (p.ts>=timeFilter.start && p.ts<=timeFilter.end));
+    log(`  Tranche horaire appliquée : ${fmtHeure(timeFilter.start)}–${fmtHeure(timeFilter.end)} → ${avant} → ${csvPts.length} points CSV conservés`);
+  }
 
   // Zone communes
   const zone = zoneCommunes(xmlPtsRaw);
@@ -642,10 +858,13 @@ function pipeline(xmlText, csvText) {
   log('='.repeat(60));
   log('FUSION XML + CSV');
   const dist = couverture(xmlPts, csvPts);
-  const portions = portionsManquantes(csvPts, dist, zone);
+  const portionsBrutes = portionsManquantes(csvPts, dist, zone);
   const sd=[...dist].sort((a,b)=>a-b);
   log(`  Couverture : médiane ${sd[sd.length>>1]|0} m, p75 ${sd[sd.length*3/4|0]|0} m`);
-  log(`  Portions manquantes : ${portions.length} (seuil ${COUVERTURE_M} m, mini ${LONGUEUR_MIN_M} m)`);
+  log(`  Portions manquantes : ${portionsBrutes.length} (seuil ${COUVERTURE_M} m, mini ${LONGUEUR_MIN_M} m)`);
+
+  const {portions, nFusions} = fusionnerAllersRetours(portionsBrutes, csvPts);
+  if (nFusions>0) log(`  Aller-retours fusionnés : ${nFusions} paire(s) (demi-tour confirmé) → ${portionsBrutes.length} → ${portions.length} portions`);
 
   const {points: enriched, ajouts} = enrichir(xmlPts, csvPts, portions);
   log(`  Points réinjectés : ${enriched.length-xmlPts.length}  →  ${enriched.length} points au total`);
@@ -719,6 +938,8 @@ function pipeline(xmlText, csvText) {
 //  UI
 // ════════════════════════════════════════════════════════════════
 let xmlFile=null, csvFile=null;
+let timeFilter=null;   // {start,end} epoch ms, ou null = pas de filtre
+let csvTsBase=null;    // date de référence pour combiner les champs "heure" manuels
 
 const dz=document.getElementById('dz');
 const fi=document.getElementById('fi');
@@ -734,8 +955,86 @@ function onFiles(files) {
     else if(ext==='csv') csvFile=f;
   }
   render();
+  analyserPlageHoraire();
 }
-function removeFile(t) { if(t==='xml') xmlFile=null; else csvFile=null; render(); }
+function removeFile(t) { if(t==='xml') xmlFile=null; else csvFile=null; render(); analyserPlageHoraire(); }
+
+// ════════════════════════════════════════════════════════════════
+//  UI — TRANCHE HORAIRE
+// ════════════════════════════════════════════════════════════════
+function resetTimeRange() {
+  document.getElementById('timerange').style.display='none';
+  document.getElementById('th-chips').innerHTML='';
+  timeFilter=null; csvTsBase=null;
+}
+
+async function analyserPlageHoraire() {
+  if (!csvFile) { resetTimeRange(); return; }
+  try {
+    const text = await readFile(csvFile);
+    const pts = lireCSV(text);
+    const segs = detecterSegments(pts);
+    renderTimeRange(segs);
+  } catch(e) {
+    resetTimeRange();
+  }
+}
+
+function renderTimeRange(segs) {
+  const box=document.getElementById('timerange');
+  const chips=document.getElementById('th-chips');
+  const hint=document.getElementById('th-hint');
+  chips.innerHTML='';
+  if (!segs) { box.style.display='none'; timeFilter=null; csvTsBase=null; return; }
+  box.style.display='block';
+  const base = segs.find(s=>s.start!=null);
+  csvTsBase = base ? base.start : null;
+
+  const mkChip=(label,val,active)=>{
+    const b=document.createElement('button');
+    b.type='button'; b.className='chip'+(active?' active':'');
+    b.textContent=label;
+    b.onclick=()=>{
+      timeFilter=val;
+      [...chips.children].forEach(c=>c.classList.remove('active'));
+      b.classList.add('active');
+    };
+    return b;
+  };
+
+  if (segs.length<=1) {
+    hint.textContent="Aucune coupure détectée dans l'historique — le CSV semble correspondre à un seul circuit.";
+    chips.appendChild(mkChip('Tout le fichier', null, true));
+    timeFilter=null;
+  } else {
+    hint.textContent=`${segs.length} tranches détectées (coupure > ${GAP_MIN} min). La plus fournie est sélectionnée par défaut — changez-la si besoin.`;
+    let iMax=0;
+    segs.forEach((s,i)=>{ if(s.n>segs[iMax].n) iMax=i; });
+    segs.forEach((s,i)=>{
+      const label = s.start!=null ? `${fmtHeure(s.start)}–${fmtHeure(s.end)} (${s.n} pts)` : `Tranche ${i+1} (${s.n} pts)`;
+      const val = s.start!=null ? {start:s.start-60000, end:s.end+60000} : null;
+      chips.appendChild(mkChip(label, val, i===iMax));
+    });
+    chips.appendChild(mkChip('Tout (fusionner)', null, false));
+    const first=segs[iMax];
+    timeFilter = first.start!=null ? {start:first.start-60000, end:first.end+60000} : null;
+  }
+}
+
+function combineDateTime(baseTs, hhmm) {
+  const d=new Date(baseTs);
+  const [h,m]=hhmm.split(':').map(Number);
+  d.setHours(h,m,0,0);
+  return d.getTime();
+}
+
+function appliquerPlagePerso() {
+  const from=document.getElementById('th-from').value;
+  const to=document.getElementById('th-to').value;
+  if (!from || !to || csvTsBase==null) return;
+  timeFilter = { start: combineDateTime(csvTsBase, from), end: combineDateTime(csvTsBase, to) };
+  [...document.getElementById('th-chips').children].forEach(c=>c.classList.remove('active'));
+}
 
 function fmt(b) { return b>1048576?(b/1048576).toFixed(1)+' Mo':Math.round(b/1024)+' Ko'; }
 
@@ -783,7 +1082,7 @@ async function convert() {
     const xmlText=await readFile(xmlFile);
     const csvText=await readFile(csvFile);
     await new Promise(r=>setTimeout(r,10)); // laisser le DOM se mettre à jour
-    const {xml, logs, nc} = pipeline(xmlText, csvText);
+    const {xml, logs, nc} = pipeline(xmlText, csvText, timeFilter);
     document.getElementById('log-body').textContent=logs.join('\n');
     document.getElementById('dot').className='dot ok';
     document.getElementById('log-label').textContent='Terminé';
