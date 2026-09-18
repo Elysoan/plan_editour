@@ -285,6 +285,8 @@ function lireCSV(text) {
   cols.forEach((c,i) => idx[c]=i);
   const tcol = detecterColonneTemps(idx);
   const capCols = detecterColonnesCapteurs(idx);
+  const vCol = Object.keys(idx).find(k => ['vitesse','vitessekmh','speed'].includes(normCol(k))) || null;
+  const maCol = Object.keys(idx).find(k => ['marchearriere','marchearr','reverse'].includes(normCol(k))) || null;
   const NUM = /^\d+\s*[A-Za-z]?\s+/;
   const pts = [];
   for (let i=1;i<lines.length;i++) {
@@ -305,7 +307,11 @@ function lireCSV(text) {
       else if (tcol.mode==='pair') ts = parseDateHeure(row[idx[tcol.dateCol]]+' '+row[idx[tcol.heureCol]]);
       else if (tcol.mode==='heureOnly') ts = parseHeure(row[idx[tcol.col]]);
     }
-    pts.push({la, lo, rue: adr, ce, cap, ts});
+    let v = null;
+    if (vCol) { const n = parseFloat((row[idx[vCol]]||'').replace(',','.')); v = isNaN(n) ? null : n; }
+    let ma = false;
+    if (maCol) { const mv=(row[idx[maCol]]||'').trim(); ma = !!mv && mv!=='0' && mv.toLowerCase()!=='false'; }
+    pts.push({la, lo, rue: adr, ce, cap, ts, v, ma});
   }
   return pts;
 }
@@ -425,6 +431,83 @@ function portionsManquantes(csvPts, dist, zone) {
     if (L>=LONGUEUR_MIN_M) portions.push([s,e,L]);
   }
   return portions;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  FUSION DES PAIRES ALLER-RETOUR (culs-de-sac / manœuvres)
+// ════════════════════════════════════════════════════════════════
+// Deux "portions manquantes" dont les extrémités se recoupent peuvent être
+// le même aller-retour vu deux fois (ex: cul-de-sac) plutôt que deux rues
+// distinctes. On ne fusionne que si un vrai demi-tour est détecté entre les
+// deux (marche arrière si dispo, sinon vitesse quasi nulle soutenue, sinon
+// en dernier recours un renversement d'angle marqué) — pas sur la seule
+// proximité géographique des extrémités, qui pourrait aussi être une
+// simple boucle de rues distinctes.
+const DEMI_TOUR_RAYON_M = 60;
+const DEMI_TOUR_VITESSE_MAX = 6;
+const DEMI_TOUR_DELAI_MAX_MS = 5*60000;   // durée plausible d'une manœuvre, pas d'un repassage plus tard
+const DEMI_TOUR_DELAI_MAX_PTS = 40;       // repli si le CSV n'a pas d'horodatage exploitable
+
+// i0..i1 doit être la fenêtre EXACTE entre les deux portions, pas leur étendue
+// totale — sinon on capte n'importe quel arrêt/manœuvre du reste du trajet.
+function detecterDemiTour(csvPts, i0, i1) {
+  for (let k=i0;k<=i1;k++) if (csvPts[k].ma) return true;
+  let lentConsec=0;
+  for (let k=i0;k<=i1;k++) {
+    const v = csvPts[k].v;
+    if (v!=null && v<=DEMI_TOUR_VITESSE_MAX) { lentConsec++; if(lentConsec>=2) return true; }
+    else lentConsec=0;
+  }
+  for (let k=Math.max(i0,1);k<i1;k++) {
+    const a=[csvPts[k-1].la,csvPts[k-1].lo], b=[csvPts[k].la,csvPts[k].lo], c=[csvPts[k+1].la,csvPts[k+1].lo];
+    if (havll(a,b)<3 || havll(b,c)<3) continue;
+    if (angdiff(bearing(a,b), bearing(b,c))>150) return true;
+  }
+  return false;
+}
+
+function fusionnerAllersRetours(portions, csvPts) {
+  const used = new Set();
+  const fusion = [];
+  let nFusions = 0;
+  for (let i=0;i<portions.length;i++) {
+    if (used.has(i)) continue;
+    const [si,ei] = portions[i];
+    let partenaire = -1;
+    for (let j=i+1;j<portions.length;j++) {
+      if (used.has(j)) continue;
+      const [sj,ej] = portions[j];
+      // la fenêtre entre les deux portions : seule zone scannée pour le demi-tour
+      let gLo, gHi;
+      if (ei < sj) { gLo = ei; gHi = sj; }
+      else if (ej < si) { gLo = ej; gHi = si; }
+      else continue; // portions imbriquées : pas un aller-retour propre
+      const delaiOk = (csvPts[gLo].ts!=null && csvPts[gHi].ts!=null)
+        ? Math.abs(csvPts[gHi].ts-csvPts[gLo].ts) <= DEMI_TOUR_DELAI_MAX_MS
+        : (gHi-gLo) <= DEMI_TOUR_DELAI_MAX_PTS;
+      if (!delaiOk) continue;
+      const aDebut=[csvPts[si].la,csvPts[si].lo], aFin=[csvPts[ei].la,csvPts[ei].lo];
+      const bDebut=[csvPts[sj].la,csvPts[sj].lo], bFin=[csvPts[ej].la,csvPts[ej].lo];
+      const rondTrip = havll(aFin,bDebut)<DEMI_TOUR_RAYON_M && havll(bFin,aDebut)<DEMI_TOUR_RAYON_M;
+      if (!rondTrip) continue;
+      if (!detecterDemiTour(csvPts, gLo, gHi)) continue;
+      partenaire = j;
+      break;
+    }
+    if (partenaire>=0) {
+      const [sj,ej] = portions[partenaire];
+      const s=Math.min(si,sj), e=Math.max(ei,ej);
+      let L=0;
+      for (let k=s+1;k<=e;k++) L += havll([csvPts[k-1].la,csvPts[k-1].lo],[csvPts[k].la,csvPts[k].lo]);
+      fusion.push([s,e,L]);
+      used.add(i); used.add(partenaire);
+      nFusions++;
+    } else {
+      fusion.push(portions[i]);
+      used.add(i);
+    }
+  }
+  return {portions: fusion, nFusions};
 }
 
 // Douglas-Peucker itératif
@@ -775,10 +858,13 @@ function pipeline(xmlText, csvText, timeFilter) {
   log('='.repeat(60));
   log('FUSION XML + CSV');
   const dist = couverture(xmlPts, csvPts);
-  const portions = portionsManquantes(csvPts, dist, zone);
+  const portionsBrutes = portionsManquantes(csvPts, dist, zone);
   const sd=[...dist].sort((a,b)=>a-b);
   log(`  Couverture : médiane ${sd[sd.length>>1]|0} m, p75 ${sd[sd.length*3/4|0]|0} m`);
-  log(`  Portions manquantes : ${portions.length} (seuil ${COUVERTURE_M} m, mini ${LONGUEUR_MIN_M} m)`);
+  log(`  Portions manquantes : ${portionsBrutes.length} (seuil ${COUVERTURE_M} m, mini ${LONGUEUR_MIN_M} m)`);
+
+  const {portions, nFusions} = fusionnerAllersRetours(portionsBrutes, csvPts);
+  if (nFusions>0) log(`  Aller-retours fusionnés : ${nFusions} paire(s) (demi-tour confirmé) → ${portionsBrutes.length} → ${portions.length} portions`);
 
   const {points: enriched, ajouts} = enrichir(xmlPts, csvPts, portions);
   log(`  Points réinjectés : ${enriched.length-xmlPts.length}  →  ${enriched.length} points au total`);
